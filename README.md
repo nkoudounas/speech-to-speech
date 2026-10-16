@@ -902,3 +902,14 @@ If you use this pipeline, please also cite the component models you run. The def
 ```
 
 Citations for optional backends such as Kokoro, KittenTTS, Pocket TTS, ChatTTS, Whisper variants, Paraformer, and MMS live in the respective [component READMEs](./src/speech_to_speech).
+
+## Local Docker override (localhost-only, with the browser demo)
+
+`docker-compose.local.yaml` overrides `docker-compose.yml`: ports bound to `127.0.0.1`, one GPU (`GPU`, default 0), models cache at `MODEL_CACHE` (default `./cache`, ~15 GB after first start), plus the `demo` UI service on port 7860.
+
+```bash
+GPU=1 docker compose -f docker-compose.yml -f docker-compose.local.yaml up -d --build
+ssh -L 7860:localhost:7860 -L 8765:localhost:8765 <host>   # open http://localhost:7860
+```
+
+The browser connects straight to the pipeline (`ws://localhost:8765/v1/realtime`), so both ports need forwarding.

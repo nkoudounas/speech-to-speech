@@ -1,0 +1,42 @@
+# Local/dev override for docker-compose.yml: localhost-only ports, pick a GPU, choose the model cache, add the browser demo UI.
+#
+#   GPU=1 MODEL_CACHE=/path/to/cache docker compose -f docker-compose.yml -f docker-compose.local.yaml up -d --build
+#   ssh -L 7860:localhost:7860 -L 8765:localhost:8765 <host>     # then open http://localhost:7860
+#
+# Variables: GPU (default 0), MODEL_CACHE (default ./cache; holds ~15 GB of models after first start).
+# The demo UI connects from the *browser* straight to the pipeline, hence ws://localhost:8765 and the 8765 forward.
+services:
+  llama:
+    ports: !override
+      - "127.0.0.1:8080:8080/tcp"
+    volumes: !override
+      - ${MODEL_CACHE:-./cache}/:/root/.cache/
+    deploy:
+      resources:
+        reservations:
+          devices: !override
+            - driver: nvidia
+              device_ids: ["${GPU:-0}"]
+              capabilities: [gpu]
+
+  pipeline:
+    ports: !override
+      - "127.0.0.1:8765:8765/tcp"
+    volumes: !override
+      - ${MODEL_CACHE:-./cache}/:/root/.cache/
+    deploy:
+      resources:
+        reservations:
+          devices: !override
+            - driver: nvidia
+              device_ids: ["${GPU:-0}"]
+              capabilities: [gpu]
+
+  demo:
+    depends_on:
+      - pipeline
+    build: demo/
+    environment:
+      SPEECH_TO_SPEECH_URL: ws://localhost:8765/v1/realtime
+    ports:
+      - "127.0.0.1:7860:7860/tcp"
