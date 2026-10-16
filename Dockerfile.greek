@@ -1,0 +1,6 @@
+# Adds the optional extras the base image leaves out: Supertonic TTS (multilingual voices, incl. Greek)
+# and faster-whisper (Whisper large-v3 STT on GPU). Build the base image first:
+#   docker compose -f docker-compose.yml -f docker-compose.local.yaml build pipeline
+ARG BASE=speech-to-speech-pipeline:latest
+FROM ${BASE}
+RUN uv pip install --python /usr/src/app/.venv/bin/python "supertonic>=1.3.1" "faster-whisper>=1.0.3"

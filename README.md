@@ -913,3 +913,14 @@ ssh -L 7860:localhost:7860 -L 8765:localhost:8765 <host>   # open http://localho
 ```
 
 The browser connects straight to the pipeline (`ws://localhost:8765/v1/realtime`), so both ports need forwarding.
+
+### Greek / bilingual preset
+
+`docker-compose.greek.yaml` + `Dockerfile.greek` swap in Whisper large-v3 (STT, GPU), Gemma 4 26B-A4B QAT via llama.cpp (own GPU, ~19 GB) and Supertonic (TTS, `el` voice F1). Parakeet was dropped for Greek because it garbles word endings, which the LLM then answers literally.
+
+```bash
+docker compose -f docker-compose.yml -f docker-compose.local.yaml build pipeline   # base image, once
+GPU=1 LLM_GPU=2 docker compose -f docker-compose.yml -f docker-compose.local.yaml -f docker-compose.greek.yaml up -d --build
+```
+
+Extra variables: `LLM_GPU` (default 2), `PIPELINE_PORT` (default 8765; forward the same port over SSH). To go English-only, drop the override file. Thinking mode (`--reasoning on` + `--responses_api_reasoning_effort low`) was tried and added too much latency.

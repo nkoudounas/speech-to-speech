@@ -1,0 +1,81 @@
+# Greek/bilingual preset on top of docker-compose.yml + docker-compose.local.yaml:
+#   Whisper large-v3 (STT, GPU) -> Gemma 4 26B-A4B QAT (LLM, own GPU) -> Supertonic (TTS).
+#
+#   docker compose -f docker-compose.yml -f docker-compose.local.yaml build pipeline      # base image, once
+#   GPU=1 LLM_GPU=2 docker compose -f docker-compose.yml -f docker-compose.local.yaml -f docker-compose.greek.yaml up -d --build
+#
+# Variables: GPU (pipeline + Whisper, default 0), LLM_GPU (llama.cpp, default 2), PIPELINE_PORT (host port, default 8765),
+# MODEL_CACHE (see docker-compose.local.yaml). The LLM needs ~19 GB of VRAM, so give it a GPU of its own.
+# Why Whisper: Parakeet drops/garbles Greek word endings ("χαρακτήρε"), which the LLM then answers literally.
+# Why the :UD-Q4_K_XL QAT quant: ggml-org's default Q8_0 (27 GB) does not fit a 24 GB card.
+services:
+  llama:
+    command: !override
+      - -hf
+      - unsloth/gemma-4-26B-A4B-it-qat-GGUF:UD-Q4_K_XL
+      - -np
+      - "2"
+      - -c
+      - "16384"
+      - -fa
+      - "on"
+      - --swa-full
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8080"
+    deploy:
+      resources:
+        reservations:
+          devices: !override
+            - driver: nvidia
+              device_ids: ["${LLM_GPU:-2}"]
+              capabilities: [gpu]
+
+  pipeline:
+    image: speech-to-speech-pipeline-greek:latest
+    build:
+      context: .
+      dockerfile: Dockerfile.greek
+    ports: !override
+      - "127.0.0.1:${PIPELINE_PORT:-8765}:8765/tcp"
+    command: !override
+      - speech-to-speech
+      - serve
+      - --host
+      - 0.0.0.0
+      - --port
+      - "8765"
+      - --llm_backend
+      - responses-api
+      - --model_name
+      - unsloth/gemma-4-26B-A4B-it-qat-GGUF
+      - --responses_api_base_url
+      - http://llama:8080/v1
+      - --responses_api_api_key
+      - ""
+      - --enable_lang_prompt
+      - --stt
+      - faster-whisper
+      - --faster_whisper_stt_model_name
+      - large-v3
+      - --faster_whisper_stt_device
+      - cuda
+      - --faster_whisper_stt_compute_type
+      - float16
+      - --faster_whisper_stt_gen_language
+      - auto
+      - --tts
+      - supertonic
+      - --supertonic_tts_lang
+      - el
+      - --supertonic_tts_voice
+      - F1
+      - --init_chat_role
+      - system
+      - --init_chat_prompt
+      - "Είσαι ένας φιλικός βοηθός. Απάντα πάντα στα ελληνικά, με σύντομες και φυσικές προτάσεις."
+
+  demo:
+    environment:
+      SPEECH_TO_SPEECH_URL: ws://localhost:${PIPELINE_PORT:-8765}/v1/realtime
