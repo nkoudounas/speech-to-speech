@@ -209,7 +209,7 @@ new `RealtimeSession` after connection.
 
 ## Tools
 
-The assistant can call two tools mid-conversation (toggle them from the **Tools**
+The assistant can call three tools mid-conversation (toggle them from the **Tools**
 button, top-right):
 
 - **Web search** — Google results via Serper.dev, proxied server-side so the key
@@ -221,6 +221,12 @@ button, top-right):
   see what you're showing it. This needs a vision-language model on the server
   (`--llm_is_vlm`; the default model is text-only); see the
   [LLM guide](../src/speech_to_speech/LLM/README.md#local-generation-options).
+- **Screen** — flip the switch and pick a screen, window or tab in the browser's
+  dialog (needed every page load, so it always starts off); when the model calls
+  `screen_snapshot`, one frame (up to 1568 px, higher than the camera's 768 px so
+  small text stays readable) is sent to the vision-language model. Stopping the
+  share from the browser's own bar switches the tool off. Same VLM requirement as
+  the camera.
 
 ## Usage limits (deployed Space only)
 

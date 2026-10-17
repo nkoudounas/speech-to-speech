@@ -86,11 +86,23 @@ const TOOL_DEFS = {
       "asks you to look.",
     parameters: { type: "object", properties: {}, required: [] },
   },
+  screen_snapshot: {
+    type: "function",
+    name: "screen_snapshot",
+    description:
+      "Capture a screenshot of the screen or window the user is sharing so you can see " +
+      "what is on it. Use it whenever the user refers to something on their screen " +
+      "(an error message, a document, a page) or asks you to look at it.",
+    parameters: { type: "object", properties: {}, required: [] },
+  },
 };
 
 /** Longest edge of the snapshot sent to the VLM, in px (keeps payload sane). */
 const SNAPSHOT_MAX_EDGE = 768;
 const SNAPSHOT_QUALITY = 0.7;
+// Screens carry small text, so they get a higher resolution/quality than a webcam frame.
+const SCREEN_SNAPSHOT_MAX_EDGE = 1568;
+const SCREEN_SNAPSHOT_QUALITY = 0.8;
 // Over WebRTC the snapshot travels inside ONE data-channel message, and SCTP
 // messages above the negotiated max (64 KiB on the aiortc side) fail to send.
 // Budget for the data-URL portion, leaving headroom for the JSON envelope.
@@ -146,7 +158,7 @@ function saveSettings(s) {
   localStorage.setItem(STORAGE_KEYS.audioOutputId, s.audioOutputId || "");
 }
 
-/** @returns {{ web_search: boolean, camera_snapshot: boolean }} */
+/** @returns {{ web_search: boolean, camera_snapshot: boolean, screen_snapshot: boolean }} */
 function loadTools() {
   try {
     const raw = JSON.parse(localStorage.getItem(STORAGE_KEYS.tools) || "{}");
@@ -157,9 +169,12 @@ function loadTools() {
     return {
       web_search: raw.web_search ?? true,
       camera_snapshot: raw.camera_snapshot ?? true,
+      // Screen sharing needs a user gesture and a picker every time, so it
+      // always starts off — a saved `true` could never be honoured on load.
+      screen_snapshot: false,
     };
   } catch {
-    return { web_search: true, camera_snapshot: true };
+    return { web_search: true, camera_snapshot: true, screen_snapshot: false };
   }
 }
 
@@ -243,6 +258,8 @@ const toolWebRow = $("#tool-web-row");
 const toolWebHint = $("#tool-web-hint");
 /** @type {HTMLElement} */
 const toolCamHint = $("#tool-cam-hint");
+const toolScreenSwitch = $("#tool-screen");
+const toolScreenHint = $("#tool-screen-hint");
 /** @type {HTMLInputElement} */
 const searchKeyInput = $("#search-key");
 /** @type {HTMLElement} */
@@ -341,6 +358,12 @@ let serverSearchKey = false;
 let userSearchKey = localStorage.getItem(STORAGE_KEYS.searchKey) || "";
 /** @type {MediaStream | null} */
 let cameraStream = null;
+/** @type {MediaStream | null} */
+let screenStream = null;
+// Off-DOM element the shared screen is decoded into, so snapshots can be drawn from it.
+const screenVideo = document.createElement("video");
+screenVideo.muted = true;
+screenVideo.playsInline = true;
 
 /** Search is usable if the server has a key or the user supplied one. */
 function searchAvailable() {
@@ -352,6 +375,7 @@ function activeToolDefs() {
   const defs = [];
   if (toolsEnabled.web_search && searchAvailable()) defs.push(TOOL_DEFS.web_search);
   if (toolsEnabled.camera_snapshot) defs.push(TOOL_DEFS.camera_snapshot);
+  if (toolsEnabled.screen_snapshot && screenStream) defs.push(TOOL_DEFS.screen_snapshot);
   return defs;
 }
 
@@ -619,6 +643,7 @@ function syncToolsUi() {
   toolWebSwitch.disabled = !avail;
   toolWebRow.classList.toggle("disabled", !avail);
   toolCamSwitch.checked = toolsEnabled.camera_snapshot;
+  toolScreenSwitch.checked = toolsEnabled.screen_snapshot && !!screenStream;
 
   if (serverSearchKey) {
     // Key lives server-side: show it as configured, never expose it.
@@ -677,6 +702,30 @@ toolCamSwitch.addEventListener("change", async () => {
   pushToolsToSession();
 });
 
+toolScreenSwitch.addEventListener("change", async () => {
+  if (toolScreenSwitch.checked) {
+    try {
+      // getDisplayMedia needs this click as its user gesture and opens the browser's picker.
+      await enableScreen();
+    } catch (err) {
+      toolScreenSwitch.checked = false;
+      const cancelled = err instanceof Error && (err.name === "NotAllowedError" || err.name === "AbortError");
+      toolScreenHint.textContent = cancelled
+        ? "Screen sharing was cancelled or blocked. Flip the switch to pick a screen or window again."
+        : `Screen sharing unavailable${err instanceof Error ? `: ${err.message}` : ""}`;
+      return;
+    }
+    toolsEnabled.screen_snapshot = true;
+    toolScreenHint.textContent = "Sharing. The assistant can look at your screen when you ask.";
+  } else {
+    disableScreen();
+    toolsEnabled.screen_snapshot = false;
+    toolScreenHint.textContent = "Let the assistant look at a screen or window you share.";
+  }
+  saveTools();
+  pushToolsToSession();
+});
+
 searchKeyInput.addEventListener("input", () => {
   if (serverSearchKey) return;
   userSearchKey = searchKeyInput.value.trim();
@@ -726,6 +775,31 @@ function disableCamera() {
   document.body.classList.remove("cam-on");
 }
 
+async function enableScreen() {
+  if (screenStream) return;
+  const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+  screenStream = stream;
+  screenVideo.srcObject = stream;
+  try { await screenVideo.play(); } catch { /* autoplay quirks; muted video is fine */ }
+  // The browser's own "Stop sharing" bar ends the track: mirror that into the tool state.
+  stream.getVideoTracks()[0]?.addEventListener("ended", () => {
+    disableScreen();
+    toolsEnabled.screen_snapshot = false;
+    toolScreenSwitch.checked = false;
+    toolScreenHint.textContent = "Let the assistant look at a screen or window you share.";
+    saveTools();
+    pushToolsToSession();
+  });
+}
+
+function disableScreen() {
+  if (screenStream) {
+    for (const t of screenStream.getTracks()) t.stop();
+    screenStream = null;
+  }
+  screenVideo.srcObject = null;
+}
+
 /** Auto-start the webcam on arrival (the camera tool is on by default). If the
  *  user declines the permission, switch the tool off and reflect it in the UI
  *  rather than nagging. */
@@ -773,12 +847,15 @@ async function watchCameraPermission() {
  * Over WebRTC the frame must fit one data-channel message, so it's re-encoded
  * down the SNAPSHOT_LADDER until it's under SNAPSHOT_DC_BUDGET_CHARS; over
  * WebSocket the first (full-quality) rung is used as before.
+ * Defaults to the webcam; pass the screen's video element and larger limits for a screenshot.
+ * @param {HTMLVideoElement} [video] @param {MediaStream | null} [stream]
+ * @param {number} [maxEdgeWs] @param {number} [qualityWs]
  * @returns {string | null}
  */
-function captureSnapshot() {
-  if (!cameraStream || !camVideo.videoWidth) return null;
-  const vw = camVideo.videoWidth;
-  const vh = camVideo.videoHeight;
+function captureSnapshot(video = camVideo, stream = cameraStream, maxEdgeWs = SNAPSHOT_MAX_EDGE, qualityWs = SNAPSHOT_QUALITY) {
+  if (!stream || !video.videoWidth) return null;
+  const vw = video.videoWidth;
+  const vh = video.videoHeight;
 
   /** @param {number} maxEdge @param {number} quality @returns {string | null} */
   const encode = (maxEdge, quality) => {
@@ -790,12 +867,12 @@ function captureSnapshot() {
     canvas.height = h;
     const ctx = canvas.getContext("2d");
     if (!ctx) return null;
-    ctx.drawImage(camVideo, 0, 0, w, h);
+    ctx.drawImage(video, 0, 0, w, h);
     return canvas.toDataURL("image/jpeg", quality);
   };
 
   if (activeTransport !== "webrtc") {
-    return encode(SNAPSHOT_MAX_EDGE, SNAPSHOT_QUALITY);
+    return encode(maxEdgeWs, qualityWs);
   }
   let dataUrl = null;
   for (const [edge, quality] of SNAPSHOT_LADDER) {
@@ -850,6 +927,15 @@ async function runTool(name, argsJson, callId) {
       } else {
         console.warn("[tool] camera_snapshot: no frame — camera off or not ready");
         result.output = "The camera is not available right now.";
+      }
+    } else if (name === "screen_snapshot") {
+      const dataUrl = captureSnapshot(screenVideo, screenStream, SCREEN_SNAPSHOT_MAX_EDGE, SCREEN_SNAPSHOT_QUALITY);
+      if (dataUrl) {
+        if (DEBUG) console.debug(`[tool] screen_snapshot captured frame (${dataUrl.length} chars), sending image + output`);
+        result = { output: "Screenshot of the shared screen captured and attached as an image.", image: dataUrl };
+      } else {
+        console.warn("[tool] screen_snapshot: no frame — screen not shared or not ready");
+        result.output = "No screen is being shared right now. Ask the user to turn on screen sharing in the Tools panel.";
       }
     } else {
       result.output = `Unknown tool: ${name}`;
